@@ -68,6 +68,32 @@ project:
 核心结论是：只有同时兼顾扩展能力、模块边界、学习反馈、故障恢复和技术演进，组织才能构建在技术变化和业务环境变化下仍然有效、可靠且可持续演进的智能体系统。
 
 
+*********************************************************************
 
+每一次智能体交互都遵循相同的基本模式：
+
+准备上下文：组合任务、指令、记忆和对话历史。
+调用模型：将上下文发送给大语言模型，并获得响应。
+处理响应：处理文本回复，或者执行工具调用。
+迭代：如果调用了工具，则将工具结果加入上下文，并从第 2 步重新开始。
+返回：提供最终响应，并在适用时更新记忆。
+
+# 简化的智能体执行循环伪代码
+
+async def agent_execution_loop(task):
+    context = prepare_context(task, instructions, memory, history)
+
+    while not done:
+        response = await model_client.create(context)
+
+        if response.has_tool_calls:
+            for tool_call in response.tool_calls:
+                result = await execute_tool(tool_call)
+                context.append(result)
+        else:
+            done = True
+
+    update_memory(context)  # 可选
+    return response
 
 
