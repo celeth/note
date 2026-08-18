@@ -118,6 +118,8 @@ Jenkins
          └── 人工确认后写入 Hindsight
 
 
+<img width="552" height="2524" alt="mermaid-2026-08-18-13-37" src="https://github.com/user-attachments/assets/7609484c-549b-4b86-b72a-4a090838912f" />
+
 
 
 
@@ -553,5 +555,6 @@ Jenkins
 
 架构图：
 
-![Uploading image.png…]()
+<img width="2826" height="1837" alt="image" src="https://github.com/user-attachments/assets/72b0610a-9ffa-425a-a239-867e39abda8c" />
+
 
