@@ -602,3 +602,128 @@ langfuse 评测 ：
 
 4. Langfuse
    → 在 Experiment 页面展示每条运行结果和汇总评分
+
+
+
+后台伪代码：
+
+
+def execute_experiment(payload: dict) -> None:
+    # 注意：
+    # dataset、experiment、run、config 的真实字段名称，
+    # 以 FastAPI 实际收到的 Langfuse payload 为准。
+    dataset_info = payload.get("dataset", {})
+    experiment_info = payload.get("experiment", {})
+    config = payload.get("config", {})
+
+    dataset_id = dataset_info.get("id")
+    dataset_name = dataset_info.get("name")
+    experiment_id = experiment_info.get("id")
+
+    # 1. 通过 Langfuse SDK / API 获取 Dataset Item
+    dataset_items = get_dataset_items(
+        dataset_id=dataset_id,
+        dataset_name=dataset_name,
+    )
+
+    # 2. 逐条执行 Agent
+    for item in dataset_items:
+        agent_result = generate_unit_test_spec(
+            design_input=item["input"],
+            agent_version=config.get("agent_version"),
+            prompt_version=config.get("prompt_version"),
+            model_deployment=config.get("model_deployment"),
+        )
+
+        # 3. 规则评测
+        rule_scores = run_rule_evaluators(
+            expected_output=item["expected_output"],
+            agent_output=agent_result,
+        )
+
+        # 4. LLM Judge 语义评测
+        judge_scores = run_llm_judge(
+            design_input=item["input"],
+            expected_output=item["expected_output"],
+            agent_output=agent_result,
+        )
+
+        # 5. Excel 校验
+        excel_score = validate_excel(
+            excel_path=agent_result.get("excel_path"),
+        )
+
+        # 6. 调用 Langfuse SDK / API，
+        #    将 Item 的 output、trace、score 关联到本次 experiment。
+        post_result_to_langfuse(
+            experiment_id=experiment_id,
+            dataset_item_id=item["id"],
+            input_data=item["input"],
+            output_data=agent_result,
+            scores=[
+                *rule_scores,
+                *judge_scores,
+                excel_score,
+            ],
+        )
+
+
+
+def execute_experiment(payload: dict) -> None:
+    # 注意：
+    # dataset、experiment、run、config 的真实字段名称，
+    # 以 FastAPI 实际收到的 Langfuse payload 为准。
+    dataset_info = payload.get("dataset", {})
+    experiment_info = payload.get("experiment", {})
+    config = payload.get("config", {})
+
+    dataset_id = dataset_info.get("id")
+    dataset_name = dataset_info.get("name")
+    experiment_id = experiment_info.get("id")
+
+    # 1. 通过 Langfuse SDK / API 获取 Dataset Item
+    dataset_items = get_dataset_items(
+        dataset_id=dataset_id,
+        dataset_name=dataset_name,
+    )
+
+    # 2. 逐条执行 Agent
+    for item in dataset_items:
+        agent_result = generate_unit_test_spec(
+            design_input=item["input"],
+            agent_version=config.get("agent_version"),
+            prompt_version=config.get("prompt_version"),
+            model_deployment=config.get("model_deployment"),
+        )
+
+        # 3. 规则评测
+        rule_scores = run_rule_evaluators(
+            expected_output=item["expected_output"],
+            agent_output=agent_result,
+        )
+
+        # 4. LLM Judge 语义评测
+        judge_scores = run_llm_judge(
+            design_input=item["input"],
+            expected_output=item["expected_output"],
+            agent_output=agent_result,
+        )
+
+        # 5. Excel 校验
+        excel_score = validate_excel(
+            excel_path=agent_result.get("excel_path"),
+        )
+
+        # 6. 调用 Langfuse SDK / API，
+        #    将 Item 的 output、trace、score 关联到本次 experiment。
+        post_result_to_langfuse(
+            experiment_id=experiment_id,
+            dataset_item_id=item["id"],
+            input_data=item["input"],
+            output_data=agent_result,
+            scores=[
+                *rule_scores,
+                *judge_scores,
+                excel_score,
+            ],
+        )
