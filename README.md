@@ -582,5 +582,23 @@ Langfuse Dataset / Experiment / Score
 发现失败模式，补充 Dataset，优化 Prompt / Agent / 模型
 
 
+langfuse 评测 ：
 
 
+1. Langfuse
+   → POST 调用你的 Webhook
+
+2. FastAPI
+   → 收到 dataset 信息、实验信息、config
+   → 创建后台任务
+   → 立即 return 202 / accepted
+
+3. 后台任务
+   → 获取 Dataset Items
+   → 对每条 Item 调用 Deep Agent
+   → 生成测试式样书 JSON / Excel
+   → 执行 Code Evaluator、LLM Judge
+   → 通过 Langfuse SDK / API 写入 output 和 scores
+
+4. Langfuse
+   → 在 Experiment 页面展示每条运行结果和汇总评分
