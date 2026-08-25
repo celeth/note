@@ -727,3 +727,140 @@ def execute_experiment(payload: dict) -> None:
                 excel_score,
             ],
         )
+
+
+
+
+
+***************************************目标***************************************************
+
+
+智能文档：PaddleOCR-VL，开源免费，可本地部署，包含多个模型
+
+
+
+
+
+详细设计书（Word / Excel）
+  ↓
+文本抽取、OCR、章节识别
+  ↓
+Deep Agent
+  ├── 按画面 / API / 批处理 / 功能模块拆分
+  ├── 提取输入、处理、输出、DB、异常、权限、状态转换
+  ├── 识别遗漏或设计歧义
+  └── 生成测试观点评价清单
+  ↓
+LLM（结构化输出）
+  ├── 正常系
+  ├── 异常系
+  ├── 境界値
+  ├── 条件组合
+  ├── 权限
+  ├── 状态迁移
+  └── DB / API / 日志确认项
+  ↓
+测试用例 JSON
+  ↓
+xlsxwriter
+  ├── 测试式样书 Sheet
+  ├── 测试数据 Sheet
+  ├── 设计—测试追溯矩阵 Sheet
+  └── 未决事项 Sheet
+  ↓
+Excel：単体テスト仕様書.xlsx
+
+
+
+
+
+
+核心目标是建立以下闭环：
+```text
+历史设计书 + 历史测试式样书
+        ↓
+标准化、脱敏、切分、人工抽检
+        ↓
+评测 Dataset（黄金集）
+        ↓
+Agent 生成测试式样书
+        ↓
+规则评测 + LLM Judge + 人工抽检
+        ↓
+Langfuse Dataset / Experiment / Score
+        ↓
+发现失败模式，补充 Dataset，优化 Prompt / Agent / 模型
+
+
+
+
+## Dataset Item 示例
+```json
+{
+  "dataset_item_id": "DD-LOGIN-001",
+  "project_id": "project_a",
+  "system_name": "员工门户系统",
+  "module": "认证模块",
+  "function_id": "LOGIN",
+  "function_name": "用户登录",
+  "test_level": "unit",
+  "source_design": {
+    "document_id": "DD-AUTH-V1.2",
+    "version": "1.2",
+    "section_ids": ["3.1", "3.1.1", "3.1.2"],
+    "content": "……详细设计文本……"
+  },
+  "ground_truth": {
+    "requirements": [],
+    "test_viewpoints": [],
+    "test_cases": [],
+    "open_issues": []
+  },
+  "metadata": {
+    "language": "ja",
+    "domain": "internal_system",
+    "has_db_update": true,
+    "has_api_call": false,
+    "has_validation": true,
+    "has_state_transition": true,
+    "difficulty": "medium",
+    "review_status": "approved"
+  }
+}
+```
+---
+## 黄金测试用例建议采用的结构
+```json
+{
+  "test_id": "UT-LOGIN-003",
+  "design_ids": ["DD-LOGIN-01"],
+  "target": "ログイン画面",
+  "category": "異常系",
+  "viewpoint": "ユーザーID必須チェック",
+  "preconditions": [
+    "ログイン画面を表示していること"
+  ],
+  "test_data": [
+    "ユーザーID：空白",
+    "パスワード：ValidPass123"
+  ],
+  "steps": [
+    "ユーザーIDを空白のまま入力する",
+    "パスワードに「ValidPass123」を入力する",
+    "ログインボタンを押下する"
+  ],
+  "expected_results": [
+    "「ユーザーIDを入力してください。」が表示される",
+    "認証処理が実行されない",
+    "セッションが作成されない",
+    "login_historyテーブルにレコードが追加されない"
+  ],
+  "verification_method": [
+    "画面メッセージを確認する",
+    "ログを確認する",
+    "DBをSQLで確認する"
+  ],
+  "priority": "High"
+}
+<img width="856" height="4335" alt="image" src="https://github.com/user-attachments/assets/0d8ad75d-5889-4c1a-9af1-f01f9494c3a6" />
+
