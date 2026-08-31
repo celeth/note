@@ -735,9 +735,47 @@ def execute_experiment(payload: dict) -> None:
 ***************************************目标***************************************************
 
 
-智能文档：PaddleOCR-VL，开源免费，可本地部署，包含多个模型
+智能文档：PaddleOCR-VL，开源免费，可本地部署，包含多个模型,   
+模型路由（根据文档类型（pdf，doc，xls），当文档只有文字的时候，默认使用小模型，不适用ocr，当设计ocr时候，在调用ocr，当效果不佳，调用更强大的模型，提升能力）
+默认单agent ，文档过长，上下文暴了的时候多agent（最大token量的60%）
+
+共享结构化状态 + 文档片段引用 + 任务消息传递。
+Agent 之间传“结论、证据 ID、任务 ID”，不传整份原文。
 
 
+
+
+原始设计书 / Excel / PDF
+        ↓
+[文档解析层：非 Agent]
+        ↓
+结构化章节、表格、Sheet、Cell、Chunk
+        ↓
+[规划 Agent]
+        ↓
+按功能 / 画面 / API / 批处理划分任务
+        ↓
+[规则抽取 Agent 群，可并行]
+        ↓
+Design Facts + Evidence
+        ↓
+[规则汇总 / 去重 / 冲突检测]
+        ↓
+按功能形成“规格事实包”
+        ↓
+[测试场景生成 Agent 群，可并行]
+        ↓
+Black-box Test Scenarios
+        ↓
+[测试用例汇总 Agent]
+        ↓
+去重、覆盖检查、未定义项、输出 JSON
+        ↓
+[Excel Renderer：非 Agent]
+        ↓
+测试式样书 Excel
+        ↓
+Code Evaluator + LLM Judge + 人工抽检
 
 
 
@@ -793,74 +831,42 @@ Langfuse Dataset / Experiment / Score
 
 
 
-
+//端到端测试 item
 ## Dataset Item 示例
-```json
 {
-  "dataset_item_id": "DD-LOGIN-001",
-  "project_id": "project_a",
-  "system_name": "员工门户系统",
-  "module": "认证模块",
-  "function_id": "LOGIN",
-  "function_name": "用户登录",
-  "test_level": "unit",
-  "source_design": {
-    "document_id": "DD-AUTH-V1.2",
-    "version": "1.2",
-    "section_ids": ["3.1", "3.1.1", "3.1.2"],
-    "content": "……详细设计文本……"
+  "input": {
+    "feature": "ログイン画面",
+    "spec_text": "USERIDまたはPASSWORDが未入力の場合、エラーメッセージを表示する。..."
   },
-  "ground_truth": {
-    "requirements": [],
-    "test_viewpoints": [],
-    "test_cases": [],
-    "open_issues": []
+  "expected_output": {
+    "required_scenarios": [    //llm judge 增加语义识别，防止误报
+      "正常登录",
+      "USERID未输入",
+      "PASSWORD未输入",
+      "用户不存在",
+      "已删除用户登录",
+      "密码错误",
+      "登录成功后的履历登记"
+    ],
+    "forbidden_assumptions": [   //llm judge 增加语义识别，防止误报
+      "账户连续失败锁定",
+      "验证码",
+      "设计书未定义的错误码"
+    ]
   },
   "metadata": {
-    "language": "ja",
-    "domain": "internal_system",
-    "has_db_update": true,
-    "has_api_call": false,
-    "has_validation": true,
-    "has_state_transition": true,
-    "difficulty": "medium",
-    "review_status": "approved"
+    "feature_type": "login",
+    "risk_level": "high",
+    "dataset_tier": "gold"
   }
 }
-```
----
-## 黄金测试用例建议采用的结构
-```json
-{
-  "test_id": "UT-LOGIN-003",
-  "design_ids": ["DD-LOGIN-01"],
-  "target": "ログイン画面",
-  "category": "異常系",
-  "viewpoint": "ユーザーID必須チェック",
-  "preconditions": [
-    "ログイン画面を表示していること"
-  ],
-  "test_data": [
-    "ユーザーID：空白",
-    "パスワード：ValidPass123"
-  ],
-  "steps": [
-    "ユーザーIDを空白のまま入力する",
-    "パスワードに「ValidPass123」を入力する",
-    "ログインボタンを押下する"
-  ],
-  "expected_results": [
-    "「ユーザーIDを入力してください。」が表示される",
-    "認証処理が実行されない",
-    "セッションが作成されない",
-    "login_historyテーブルにレコードが追加されない"
-  ],
-  "verification_method": [
-    "画面メッセージを確認する",
-    "ログを確認する",
-    "DBをSQLで確認する"
-  ],
-  "priority": "High"
-}
-<img width="856" height="4335" alt="image" src="https://github.com/user-attachments/assets/0d8ad75d-5889-4c1a-9af1-f01f9494c3a6" />
+
+
+
+Langfuse 检测：
+通用 ，包括agent开始，tool调用，大模型调用等等
+
+
+自定义：  doc解析，code生成（？），
+
 
