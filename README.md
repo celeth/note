@@ -558,7 +558,39 @@ Jenkins
 <img width="2826" height="1837" alt="image" src="https://github.com/user-attachments/assets/72b0610a-9ffa-425a-a239-867e39abda8c" />
 
 
+最简化流程：
+SonarQube 扫描完成
+       │
+       ▼
+Webhook 触发 Agent 分析任务
+       │
+       ├─ 从 SonarQube API 获取 Issue、规则、文件、质量门禁（按照重要程度，而不要所有的都查出来，太多，上下文爆满）
+       │
+       ├─ 从 Hindsight Recall 获取本项目的历史处理经验
+       │
+       ▼
+Agent 生成“项目化”修复建议
+       │
+       ├─ 开发者接受 / 修改后接受 / 拒绝 / 标记不处理
+       │
+       ▼
+创建 PR / 提交代码 （固定一个ai修复分支，每次agent自动提交，并测试）
+       │
+       ├─ GitHub / GitLab Webhook：PR 已合并
+       └─ SonarQube Webhook：新扫描完成
+       │
+       ▼
+验证：Issue 是否消失、CI 是否通过、是否引入新问题
+       │
+       ▼
+将“已验证的处理结果”写入 Hindsight
+       │
+       ▼
+未来出现类似 Issue 时优先召回本项目经验
 
+<img width="963" height="834" alt="image" src="https://github.com/user-attachments/assets/ba37f591-5c35-4e40-bc9b-decec3ac7cc6" />
+
+************************
 
 最终完全版：
 
