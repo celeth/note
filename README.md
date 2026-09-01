@@ -560,6 +560,1040 @@ Jenkins
 
 
 
+最终完全版：
+
+可以。加入 `AsyncPostgresSaver` 后，建议采用下面这套完整架构：
+
+> **AsyncPostgresSaver 管工作流与对话状态；PostgreSQL/审计库管事实与证据；Hindsight 管长期语义经验；SonarQube 管检测与验证；GitHub MCP 管代码与 PR；Jenkins 管构建、测试和隔离扫描。**
+
+---
+
+# 1. 最终总体架构
+
+```text
+                         ┌──────────────────────┐
+                         │      SonarQube       │
+                         │  主项目：gpcs         │
+                         │  Web API + Webhook   │
+                         └──────────┬───────────┘
+                                    │
+                           扫描完成 Webhook
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                  Agent Orchestrator / LangGraph                      │
+│                                                                    │
+│  AsyncPostgresSaver                                                 │
+│  - 对话状态                                                         │
+│  - LangGraph Checkpoint                                             │
+│  - 工具调用状态                                                     │
+│  - 等待人工审批                                                     │
+│  - 等待 Jenkins / SonarQube Webhook                                │
+│  - 失败恢复、幂等、断点续跑                                         │
+│                                                                    │
+│  工作流：                                                           │
+│  1. SonarQube 问题筛选                                              │
+│  2. Hindsight Recall                                                │
+│  3. Agent 给出项目化建议                                            │
+│  4. 等待人工确认                                                    │
+│  5. 调用 GitHub MCP 修改 AI 分支                                    │
+│  6. 调用 Jenkins 执行测试                                           │
+│  7. 验证 PR / Diff / SonarQube 结果                                │
+│  8. 生成审计证据包                                                  │
+│  9. Hindsight Retain                                                │
+└──────────┬──────────────────────┬─────────────────────┬───────────┘
+           │                      │                     │
+           ▼                      ▼                     ▼
+┌─────────────────┐   ┌───────────────────┐  ┌──────────────────────┐
+│ SonarQube Tool  │   │ GitHub MCP         │  │ Jenkins Tool         │
+│                 │   │                   │  │                      │
+│ - Quality Gate  │   │ - Commit / Diff   │  │ - Build              │
+│ - Metrics       │   │ - Files           │  │ - Unit Test          │
+│ - Priority      │   │ - AI Branch       │  │ - Integration Test   │
+│ - Issues        │   │ - PR / Review     │  │ - Sonar Scanner      │
+│ - Rules         │   │ - Comments        │  │ - Artifact / Logs    │
+└─────────────────┘   └───────────────────┘  └──────────────────────┘
+           │
+           ▼
+┌────────────────────────────────────────────────────────────────────┐
+│                         Hindsight Memory                            │
+│                                                                    │
+│ conversation:<tenant>:<user>                                      │
+│   - 用户长期偏好、输出要求、审批习惯                                │
+│                                                                    │
+│ sonarqube:<tenant>:<project>                                      │
+│   - 已验证修复经验、模块例外、失败反例、项目规范                    │
+│                                                                    │
+│ policy:<tenant>                                                    │
+│   - 组织安全策略、禁止路径、自动修复白名单、审批规则                │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+# 2. 各组件职责
+
+| 组件 | 职责 | 不能替代什么 |
+|---|---|---|
+| `AsyncPostgresSaver` | LangGraph Checkpoint、对话状态、任务中断恢复、人工审批恢复 | 不能替代 Hindsight 的语义检索 |
+| PostgreSQL 业务表 / 审计库 | 扫描任务映射、修复批次、验证状态、幂等键、审计索引 | 不能替代 Git/PR 的代码事实 |
+| GitHub / GitLab | Commit、Diff、PR、Review、代码历史、回滚基础 | 不能判断 SonarQube Issue 是否消失 |
+| Jenkins | 编译、测试、扫描、构建日志、Artifact | 不能决定项目经验是否应沉淀 |
+| SonarQube | 静态检测、Issue、Rule、Quality Gate、最终扫描验证 | 不能提供项目级处理偏好 |
+| Hindsight | 项目经验、用户偏好、例外、反例的语义召回 | 不能作为工作流 Checkpoint 或审计主库 |
+| Agent | 综合决策、生成建议、执行受控修复 | 不能绕过主干保护与人工审批 |
+
+---
+
+# 3. 数据存储分层
+
+建议采用四层，而不是把所有数据塞到 Hindsight。
+
+```text
+第一层：AsyncPostgresSaver
+第二层：业务状态数据库
+第三层：审计与证据存储
+第四层：Hindsight 长期语义记忆
+```
+
+---
+
+## 3.1 第一层：AsyncPostgresSaver
+
+保存 LangGraph 的精确工作状态。
+
+例如：
+
+```text
+当前 thread_id
+当前对话消息
+当前图节点
+当前工具调用
+当前候选 Issue
+当前 PR 编号
+当前 Jenkins Build ID
+当前 SonarQube taskId
+是否等待人工审批
+是否等待扫描完成
+是否已执行 Hindsight Retain
+```
+
+建议的 `thread_id`：
+
+```text
+scan:gpcs:<sonar-task-id>
+pr:company/gpcs:<pr-number>
+conversation:<tenant>:<user>:<session-id>
+```
+
+例如：
+
+```text
+scan:gpcs:AX0abc123
+pr:company/gpcs:1024
+conversation:company-a:zhangsan:20260424-001
+```
+
+典型状态：
+
+```text
+RECEIVED_SONAR_WEBHOOK
+→ FETCHING_PRIORITY_ISSUES
+→ RECALLING_PROJECT_MEMORY
+→ WAITING_FOR_HUMAN_APPROVAL
+→ APPLYING_PATCH
+→ WAITING_FOR_JENKINS
+→ WAITING_FOR_SONAR_VALIDATION
+→ GENERATING_AUDIT_PACKAGE
+→ RETAINING_HINDSIGHT_MEMORY
+→ COMPLETED
+```
+
+---
+
+## 3.2 第二层：业务状态数据库
+
+`AsyncPostgresSaver` 用于恢复 LangGraph 状态，但修复系统还需要独立业务表。
+
+建议至少有：
+
+```text
+fix_batches
+scan_runs
+issue_snapshots
+audit_events
+idempotency_keys
+approval_records
+```
+
+### `fix_batches`
+
+一个 PR 对应一个修复批次。
+
+```text
+repository
+pr_number
+base_branch
+head_branch
+base_commit
+head_commit
+merge_commit
+status
+created_at
+updated_at
+```
+
+例如：
+
+```text
+company/gpcs
+PR #1024
+main
+ai/sonar-remediation
+```
+
+---
+
+### `scan_runs`
+
+建立 Git Commit 与 SonarQube 扫描的关联。
+
+```text
+repository
+branch
+commit_sha
+jenkins_build_id
+sonar_project_key
+sonar_task_id
+sonar_analysis_id
+status
+started_at
+completed_at
+```
+
+自然唯一键：
+
+```text
+repository + commit_sha + sonar_task_id
+```
+
+这样即使同一 PR 连续触发 5～6 次 CI，也不会混乱。
+
+---
+
+### `issue_snapshots`
+
+只保存候选文件和候选规则的 Issue 快照，不保存全项目全部 Issue。
+
+```text
+snapshot_id
+repository
+project_key
+commit_sha
+analysis_id
+file_path
+rule_key
+issue_fingerprint
+issue_key_at_time
+message
+severity
+impact_quality
+impact_severity
+status
+```
+
+---
+
+### `idempotency_keys`
+
+防止重复 Webhook、重复 Jenkins 回调、重复 Hindsight 写入。
+
+例如：
+
+```text
+sonar-webhook:<task-id>
+jenkins-build:<job>:<build-number>
+hindsight-retain:<repo>:<merge-sha>:<issue-fingerprint>
+audit-package:<repo>:<merge-sha>
+```
+
+---
+
+## 3.3 第三层：审计与修复证据库
+
+建议建立独立仓库：
+
+```text
+company/ai-remediation-audit
+```
+
+目录：
+
+```text
+ai-remediation-audit/
+└── gpcs/
+    └── 2026/
+        └── 04/
+            └── pr-1024-abc123def456/
+                ├── summary.md
+                ├── evidence.json
+                ├── sonar-before.json
+                ├── sonar-after.json
+                ├── jenkins-result.json
+                ├── pr-diff.patch
+                └── hindsight-result.json
+```
+
+用途：
+
+```text
+人工复盘
+审计
+事故调查
+回滚依据
+模型行为追踪
+证明修复目的与验证证据
+```
+
+---
+
+## 3.4 第四层：Hindsight Memory Bank
+
+建议至少三个 Bank。
+
+```text
+conversation:<tenant>:<user>
+sonarqube:<tenant>:<project>
+policy:<tenant>
+```
+
+例如：
+
+```text
+conversation:company-a:zhangsan
+sonarqube:company-a:gpcs
+policy:company-a
+```
+
+---
+
+# 4. Hindsight Bank 设计
+
+## 4.1 用户对话记忆
+
+```text
+conversation:<tenant>:<user>
+```
+
+保存：
+
+```text
+用户偏好中文输出；
+修复建议必须包含风险、修改文件、测试与回滚方式；
+用户不接受 Agent 自动合并 main；
+用户希望低风险问题按批次处理；
+用户对某个项目的关注重点。
+```
+
+不保存：
+
+```text
+全部对话原文；
+完整代码；
+完整日志；
+Token；
+密码；
+业务敏感数据。
+```
+
+完整对话和当前工作流状态仍由：
+
+```text
+AsyncPostgresSaver
+```
+
+保存。
+
+---
+
+## 4.2 项目修复知识
+
+```text
+sonarqube:<tenant>:<project>
+```
+
+例如：
+
+```text
+sonarqube:company-a:gpcs
+```
+
+保存：
+
+```text
+已验证的修复模式；
+项目模块例外；
+规则在本项目中的实际处理方法；
+失败修复反例；
+架构限制；
+经过审批的不处理理由。
+```
+
+例如：
+
+```text
+在 gpcs 的 Spring 配置类中，
+java:S1128 的未使用 import 一般可安全删除；
+不得顺带调整 Bean 或缓存配置。
+
+在 gpcs 的 EditorConfig 模块中，
+replaceAll() 可能依赖正则表达式；
+未经确认不得自动替换为 replace()。
+
+legacy-batch 模块的外部协议 DTO，
+java:S107 参数过多通常不自动重构；
+因为字段和构造函数需保持外部协议兼容。
+```
+
+---
+
+## 4.3 组织策略 Bank
+
+```text
+policy:<tenant>
+```
+
+保存只读规则：
+
+```text
+自动修复白名单；
+禁止修改路径；
+安全问题处理规则；
+PR 审批要求；
+日志脱敏规则；
+Hindsight 写入条件；
+模型权限边界。
+```
+
+例如：
+
+```text
+禁止自动修改：
+- Jenkinsfile
+- .github/workflows/
+- db/migration/
+- auth/
+- security/
+- payment/
+- Dockerfile
+- helm/
+- terraform/
+
+禁止直接提交 main。
+禁止自动合并 PR。
+新增 Vulnerability 必须人工审批。
+```
+
+---
+
+# 5. SonarQube 扫描完成后的分析流程
+
+```text
+SonarQube 主干扫描完成
+        │
+        ▼
+Webhook 到达编排服务
+        │
+        ▼
+AsyncPostgresSaver 创建 / 恢复 scan thread
+        │
+        ▼
+校验 taskId、签名、扫描状态、幂等键
+        │
+        ▼
+查询 Quality Gate、项目指标、Issue 聚合
+        │
+        ▼
+按优先级获取有限候选 Issue
+        │
+        ▼
+Hindsight Recall：
+policy → 项目经验 → 用户偏好
+        │
+        ▼
+Agent 生成项目化修复建议
+        │
+        ▼
+等待人工接受 / 修改后接受 / 拒绝 / 不处理
+```
+
+---
+
+## 5.1 不全量读取 SonarQube Issue
+
+对于 16,876 条 Issue，Agent 不能直接读取全部。
+
+筛选顺序：
+
+```text
+1. Quality Gate 的失败原因
+2. 新增 Vulnerability / Security 问题
+3. 新增 BLOCKER / CRITICAL
+4. HIGH 影响的 Maintainability / Reliability 问题
+5. quickFixAvailable=true 的低风险问题
+6. 历史遗留问题只做规则和模块聚合
+```
+
+建议单次上限：
+
+```text
+P0 / P1：全部
+P2：最多 20 条
+P3：最多 30 条
+P4：只传统计、Top Rule、Top 文件和少量样本
+```
+
+---
+
+# 6. 人工确认与固定 AI 修复分支
+
+人工批准后，Agent 才能修改代码。
+
+```text
+main
+  └── ai/sonar-remediation
+```
+
+规则：
+
+```text
+Agent 仅能写入 ai/sonar-remediation。
+Agent 不得 push main。
+Agent 不得 merge PR。
+Agent 不得修改受保护文件。
+Agent 不得处理安全和高风险业务逻辑。
+```
+
+---
+
+## 6.1 批次策略
+
+一个批次可包含多个低风险问题。
+
+例如：
+
+```text
+Commit A：
+- 删除 3 个未使用 import；
+
+Commit B：
+- 删除 2 个无用变量；
+
+Commit C：
+- 修复 4 个低风险冗余代码问题。
+```
+
+不需要：
+
+```text
+一条 Issue 一个分支；
+一条 Issue 一个 PR；
+一条 Issue 一个复杂 relationId。
+```
+
+批次边界建议：
+
+```text
+最多 20～50 个 Issue；
+最多 30 个文件；
+最多 500 行有效改动；
+最多 3 个模块；
+最多积累 1～3 天。
+```
+
+达到阈值就创建或更新 PR：
+
+```text
+ai/sonar-remediation → main
+```
+
+---
+
+# 7. Jenkins Pipeline 设计
+
+建议至少有两个 Pipeline。
+
+```text
+gpcs-ai-remediation-pipeline
+gpcs-main-validation-pipeline
+```
+
+可选：
+
+```text
+gpcs-revert-ai-remediation-pipeline
+```
+
+---
+
+## 7.1 AI 修复分支 Pipeline
+
+```text
+Checkout ai/sonar-remediation
+      │
+      ▼
+编译
+      │
+      ▼
+单元测试
+      │
+      ▼
+集成测试
+      │
+      ▼
+依赖 / Secret / 安全检查
+      │
+      ▼
+隔离 SonarQube 扫描
+projectKey = gpcs-ai-remediation
+      │
+      ▼
+读取 .report-task.txt
+      │
+      ▼
+上报：
+commitSha ↔ Jenkins Build ↔ ceTaskId
+```
+
+Jenkins 上报示例：
+
+```json
+{
+  "repository": "company/gpcs",
+  "branch": "ai/sonar-remediation",
+  "commitSha": "cccccccc",
+  "pullRequest": 1024,
+  "jenkinsBuild": 103,
+  "sonarProjectKey": "gpcs-ai-remediation",
+  "sonarTaskId": "AX0abc123"
+}
+```
+
+---
+
+## 7.2 主干最终验证 Pipeline
+
+PR 合并后：
+
+```text
+Checkout main
+      │
+      ▼
+编译 + 全量测试
+      │
+      ▼
+主项目 SonarQube 扫描
+projectKey = gpcs
+      │
+      ▼
+读取 .report-task.txt
+      │
+      ▼
+上报：
+mergeCommit ↔ Jenkins Build ↔ ceTaskId
+```
+
+只有主干最终扫描才有资格触发：
+
+```text
+Hindsight Retain
+```
+
+---
+
+# 8. GitHub MCP 在修复验证中的作用
+
+GitHub MCP 主要负责确认：
+
+```text
+Agent 是否真的按建议修改了相应代码。
+```
+
+核心工具：
+
+```text
+pull_request_read
+get_commit
+get_file_contents
+list_commits
+create_or_update_file
+push_files
+create_pull_request
+update_pull_request
+pull_request_review_write
+add_issue_comment
+actions_get
+get_job_logs
+```
+
+验证优先使用：
+
+```text
+pull_request_read
+```
+
+因为它能够获取：
+
+```text
+Base Commit
+Head Commit
+文件变更列表
+Diff
+Commit 列表
+Check 状态
+Review 信息
+```
+
+---
+
+## 8.1 Git Diff 与 SonarQube Snapshot 联合验证
+
+例如 SonarQube 修复前存在：
+
+```text
+Rule：java:S1128
+File：CacheConfig.java
+Message：Remove this unused import EnableCaching.
+```
+
+Git Diff：
+
+```diff
+-import org.springframework.cache.annotation.EnableCaching;
+```
+
+主干最终扫描后，该文件不再存在相同规则、相似上下文的 Issue。
+
+则判断：
+
+```text
+VERIFIED_RESOLVED
+```
+
+---
+
+# 9. Issue Snapshot 与 Issue key 变化处理
+
+不能仅依据：
+
+```text
+旧 SonarQube Issue key 是否消失。
+```
+
+因为 Issue key、行号、路径可能随重构变化。
+
+应使用问题语义指纹：
+
+```text
+projectKey
++ ruleKey
++ 标准化文件路径
++ 标准化问题消息
++ 代码片段或上下文
++ 软件质量影响
+```
+
+例如：
+
+```text
+gpcs
++ java:S1128
++ src/main/java/jp/co/sws/gpcs/CacheConfig.java
++ Remove this unused import
++ import org.springframework.cache.annotation.EnableCaching;
++ MAINTAINABILITY
+```
+
+结果状态：
+
+| 状态 | 含义 |
+|---|---|
+| `VERIFIED_RESOLVED` | Diff 修改正确，最终扫描中问题消失 |
+| `STILL_PRESENT` | 最终扫描中问题仍存在 |
+| `AMBIGUOUS` | 文件移动、重构或 Issue 追踪变化，无法自动确认 |
+| `RESOLVED_BY_FILE_DELETION` | 文件删除导致 Issue 消失，不可当作通用修复经验 |
+| `NEW_HIGH_RISK_ISSUE` | 修复引入新的高风险问题 |
+| `TEST_FAILED` | 测试失败，不可写 Hindsight |
+
+---
+
+# 10. 修复历史与审计证据包
+
+每个合并后的 AI 修复 PR，都必须生成证据包。
+
+自然审计标识：
+
+```text
+github:company/gpcs:pr:1024:merge:abc123def456
+```
+
+至少包含：
+
+```text
+修复的问题；
+修复目的；
+SonarQube 原始证据；
+Agent 建议；
+Hindsight Recall 的项目经验依据；
+修改文件；
+Git Diff；
+Base / Head / Merge Commit；
+Jenkins Build；
+测试结果；
+SonarQube 最终扫描结果；
+Quality Gate 前后状态；
+未解决或新增问题；
+人工审批人；
+回滚方式；
+Hindsight 写入结果。
+```
+
+---
+
+## 10.1 人类可读报告
+
+Agent 应在 PR 中生成 Markdown 报告。
+
+```markdown
+# AI 修复报告
+
+## 修复目的
+
+处理 SonarQube 检测出的低风险可维护性问题。
+
+## 涉及规则
+
+| 规则 | 文件 | 问题 | 处理方式 |
+|---|---|---|---|
+| java:S1128 | CacheConfig.java | 未使用 import | 删除无用 import |
+| java:S5361 | EditorConfig.java | replaceAll 可优化 | 经确认后使用 replace |
+
+## 修改文件
+
+- `CacheConfig.java`
+  - 删除未使用的 `EnableCaching` import；
+  - 不修改 Spring Bean、缓存配置和业务逻辑。
+
+## 验证
+
+- Jenkins 编译：通过
+- 单元测试：通过
+- 集成测试：通过
+- SonarQube 主干扫描：通过
+- Quality Gate：通过
+- 新增 Critical / Vulnerability：0
+
+## 回滚
+
+如发现异常，请针对 Merge Commit `abc123def456` 创建 Revert PR。
+```
+
+---
+
+# 11. Hindsight Retain 条件
+
+只有满足以下所有条件，才能写入项目记忆：
+
+```text
+PR 已合并到 main
+AND main Jenkins 成功
+AND 测试成功
+AND SonarQube 主干扫描成功
+AND 修复前候选 Issue 在最终扫描中消失
+AND Git Diff 证明目标代码确实被修改
+AND 没有新增 P0 / P1 问题
+AND 修复审计证据包已生成
+```
+
+写入的是经验，不是原始日志。
+
+示例：
+
+```text
+项目：gpcs
+规则：java:S1128
+场景：Spring 配置类中的未使用 import
+处理方式：删除无用 import，不重构配置或 Bean 定义。
+适用范围：普通配置类。
+不适用范围：条件编译、注解处理、生成代码依赖场景。
+证据：PR #1024、Merge Commit abc123def456、主干 Sonar 扫描通过。
+置信度：HIGH
+```
+
+---
+
+# 12. 回滚方案
+
+AI 修复出问题时必须采用标准 Git 回滚流程：
+
+```text
+发现问题
+    │
+    ▼
+暂停 AI 自动修复任务
+    │
+    ▼
+从审计证据包取得 Merge Commit
+    │
+    ▼
+创建 Revert PR
+    │
+    ▼
+Jenkins 编译、测试与扫描
+    │
+    ▼
+人工审批
+    │
+    ▼
+合并回滚 PR
+    │
+    ▼
+更新审计记录和 Hindsight 状态
+```
+
+禁止：
+
+```text
+force push main
+git reset --hard main
+删除 Commit 历史
+Agent 直接修改主干
+```
+
+---
+
+# 13. 推荐状态机
+
+```text
+SONAR_WEBHOOK_RECEIVED
+    ↓
+PRIORITY_ISSUES_SELECTED
+    ↓
+PROJECT_MEMORY_RECALLED
+    ↓
+RECOMMENDATION_CREATED
+    ↓
+WAITING_FOR_HUMAN_APPROVAL
+    ↓
+APPROVED
+    ↓
+PATCH_APPLIED_TO_AI_BRANCH
+    ↓
+WAITING_FOR_JENKINS
+    ↓
+AI_BRANCH_VALIDATED
+    ↓
+PR_OPENED
+    ↓
+WAITING_FOR_REVIEW
+    ↓
+MERGED
+    ↓
+WAITING_FOR_MAIN_SONAR_VALIDATION
+    ↓
+FINAL_VERIFICATION
+    ├─ VERIFIED_RESOLVED
+    ├─ STILL_PRESENT
+    ├─ AMBIGUOUS
+    ├─ TEST_FAILED
+    └─ NEW_HIGH_RISK_ISSUE
+    ↓
+AUDIT_PACKAGE_CREATED
+    ↓
+HINDSIGHT_RETAINED
+    ↓
+COMPLETED
+```
+
+每一步都由：
+
+```text
+AsyncPostgresSaver
+```
+
+保存 Checkpoint，因此即使服务重启、Webhook 延迟、审批跨天，也可以恢复执行。
+
+---
+
+# 14. 最终闭环
+
+```text
+SonarQube 主干扫描完成
+      │
+      ▼
+Webhook 触发 LangGraph
+      │
+      ▼
+AsyncPostgresSaver 保存与恢复工作流状态
+      │
+      ▼
+SonarQube Tool 仅获取高优先级候选 Issue
+      │
+      ▼
+Hindsight Recall：
+组织策略 → 项目经验 → 用户偏好
+      │
+      ▼
+Agent 输出项目化修复建议
+      │
+      ▼
+人工确认
+      │
+      ▼
+GitHub MCP 修改 ai/sonar-remediation 固定分支
+      │
+      ▼
+Jenkins 构建、测试、隔离扫描
+      │
+      ▼
+GitHub MCP 获取 PR Diff、文件变更与 Check 状态
+      │
+      ▼
+创建 PR，人工 Review
+      │
+      ▼
+PR 合并 main
+      │
+      ▼
+main Jenkins + SonarQube 最终扫描
+      │
+      ▼
+修复前 Snapshot vs 最终 Snapshot
+      │
+      ▼
+生成审计证据包
+      │
+      ▼
+Hindsight Retain 已验证项目经验
+      │
+      ▼
+后续相似问题优先参考项目本地经验
+```
+
+这套设计可以保证：
+
+- Agent 不会被大量 Issue 撑爆上下文；
+- 不会为每条 Issue 创建分支；
+- 多次 CI、多次扫描可以精确关联；
+- SonarQube Issue key 变化不会导致验证失效；
+- 自动修复不会直接影响主干；
+- 修复过程可审计、可复盘、可回滚；
+- Hindsight 只积累经过验证的项目经验；
+- `AsyncPostgresSaver` 保证长流程、人工审批和异步 Webhook 场景下可恢复、可追踪、可幂等执行。
+
+ps:threa_id按照项目来定义，也就是一个项目一个thread_id,所有人共用一个chat，对于审批，修改文件等写操作采用锁串行，其他读操作（比如读取issues）等串行
+
+
 *******************************************************project2*****************************************************************************************
 
 内部设计，详细设计 ---》 测试式样书
